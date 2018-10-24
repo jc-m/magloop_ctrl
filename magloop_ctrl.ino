@@ -2,6 +2,7 @@
 
 // include the library code:
 #include <LiquidCrystal_PCF8574.h>
+#include <AccelStepper.h>
 
 LiquidCrystal_PCF8574 lcd(0x27);  // set the LCD address to 0x27 for a 16 chars and 2 line display
 
@@ -13,11 +14,9 @@ LiquidCrystal_PCF8574 lcd(0x27);  // set the LCD address to 0x27 for a 16 chars 
 #define TUNING 0
 #define SETTING 1
 
-#define SPEED 1000 // Not really speed - pulse length in microseconds
-
 // defines pins numbers
 // A4988/DRV8825 pins
-const int enablePin = 12; // 8
+const int enablePin = 13; // 8
 const int ms1Pin = 11; // 7
 const int ms2Pin = 10; // 6
 const int ms3Pin = 9;  // 5
@@ -33,7 +32,6 @@ int stepCount;
 int stepList [6] = { 1, 2, 5, 10, 50, 100};
 int stepIndex =2; // start at 10 steps per rotation.
 
-
 char line2[16];
 char* modes[] = {
   "Tuning ",
@@ -47,17 +45,26 @@ volatile int8_t encoderDir = 0;
 volatile byte oldEncPos = 0;
 volatile byte reading = 0;
 
+unsigned long lastMotorRun = 0;
+bool enabled;
+
 byte lastButtonState = HIGH;
 byte buttonState = HIGH;
 bool menu;
 unsigned long lastButtonChange = 0;
 unsigned long debounceDelay = 50;    // the debounce time;
 
+AccelStepper stepper(AccelStepper::DRIVER, stepPin, dirPin);
+
 void setup() {
-  // Sets the stepper driver pins as Outputs
-  pinMode(stepPin, OUTPUT);
-  pinMode(dirPin, OUTPUT);
-  pinMode(enablePin, OUTPUT);
+
+  stepper.setEnablePin(enablePin);
+  stepper.setPinsInverted(false, false, true);
+  stepper.setCurrentPosition(0);
+  stepper.setMaxSpeed(100);
+  stepper.setMinPulseWidth(100);
+  
+  // Sets the stepper driver microstepping pins as Outputs
   pinMode(ms1Pin, OUTPUT);
   pinMode(ms2Pin, OUTPUT);
   pinMode(ms3Pin, OUTPUT);
@@ -70,13 +77,10 @@ void setup() {
   attachInterrupt(0, PinA, RISING);
   attachInterrupt(1, PinB, RISING);
 
-  // initialize pins
-  digitalWrite(dirPin, HIGH);
-  digitalWrite(enablePin, HIGH); // disabled
-  // set the microstepping to 1/16 on A4988 or 1/32 on DRV8825
+   // set the microstepping to 1/16 on A4988 or 1/32 on DRV8825
   digitalWrite(ms1Pin, HIGH);
   digitalWrite(ms2Pin, HIGH);
-  digitalWrite(ms3Pin, HIGH);
+  digitalWrite(ms3Pin, LOW);
 
 #ifdef DEBUG
   Serial.begin(115200);
@@ -95,30 +99,6 @@ void setup() {
   lcd.print(line2);
 }
 
-void move(long steps, uint8_t dir, long interval) {
-#ifdef DEBUG
-  Serial.print("Move "); Serial.print(dir); Serial.print(" "); Serial.println(steps);
-#endif
-
-  digitalWrite(enablePin, LOW);
-  // add a bit of delay before sending the pulse to avoid clicks
-  delayMicroseconds(1000);
-
-  if (dir == CW) {
-    digitalWrite(dirPin, HIGH);
-  } else {
-    digitalWrite(dirPin, LOW);
-  }
-
-  for (int x = 0; x < steps; x++) {
-    digitalWrite(stepPin, HIGH);
-    delayMicroseconds(interval);
-    digitalWrite(stepPin, LOW);
-    delayMicroseconds(interval);
-  }
-
-  digitalWrite(enablePin, HIGH);
-}
 void PinA() {
   cli();
   reading = PIND & 0xC;
@@ -146,7 +126,6 @@ void PinB() {
 }
 
 void loop() {
-
 
   int button = digitalRead(buttonPin);
 
@@ -187,11 +166,12 @@ void loop() {
 #endif
         }
       } else {
-#ifdef DEBUG
-        Serial.print("-"); Serial.println(encoderPos);
-#endif
         dir="-";
-        move(stepCount, CCW, SPEED);
+        stepper.move(stepCount * -1);
+#ifdef DEBUG
+        Serial.print(dir); Serial.print(encoderPos);Serial.print("="); Serial.println(stepper.targetPosition());
+#endif
+
       }
 
     } else {
@@ -204,11 +184,11 @@ void loop() {
 #endif
         }
       } else {
-#ifdef DEBUG
-        Serial.print("+"); Serial.println(encoderPos);
-#endif
         dir="+";
-        move(stepCount, CW, SPEED);
+        stepper.move(stepCount);
+#ifdef DEBUG
+        Serial.print(dir); Serial.print(encoderPos);Serial.print("="); Serial.println(stepper.targetPosition());
+#endif
       }
 
     }
@@ -219,7 +199,28 @@ void loop() {
     oldEncPos = encoderPos;
     
   }
-
+  if (stepper.distanceToGo() != 0) {
+    // set this here as this was not reliable for single steps.
+    lastMotorRun = millis();
+    if (!enabled) {
+#ifdef DEBUG
+      Serial.println("Waking up ... ");
+#endif
+      stepper.enableOutputs();
+      enabled = true;
+    }
+  } else {
+    if (enabled && (millis() > lastMotorRun + 100)) {
+        stepper.disableOutputs();
+        enabled = false;
+#ifdef DEBUG
+        Serial.println("Sleeping ... ");
+#endif
+    }
+  }
+  
+  stepper.run();
+  
   lastButtonState = button;
 
 }
